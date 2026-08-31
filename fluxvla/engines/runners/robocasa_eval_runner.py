@@ -58,6 +58,10 @@ ROBOCASA_N15_ACTION_KEYS = {
     'action.waist': (26, 29),  # waist, 3D
 }
 
+# GR00T N1.7 keeps the same GR1 group order as N1.5 while changing the
+# state/action normalization contract.
+ROBOCASA_N17_ACTION_KEYS = dict(ROBOCASA_N15_ACTION_KEYS)
+
 
 @RUNNERS.register_module()
 class RobocasaEvalRunner(BaseEvalRunner):
@@ -88,6 +92,8 @@ class RobocasaEvalRunner(BaseEvalRunner):
         rollout_video_key: Observation image key used for rollout videos.
         action_order: Action split order. Defaults to ``n15`` for GR00T and
             ``fluxvla`` otherwise.
+        denormalize_action_chunk: Denormalize the full predicted action chunk
+            in one call. This is required by horizon-dependent statistics.
         norm_stats_path: Optional explicit dataset statistics path.
         grouped_norm_stats: Whether to load one statistics file per group.
         norm_stats_group_names: Per-task group names for grouped statistics.
@@ -123,6 +129,7 @@ class RobocasaEvalRunner(BaseEvalRunner):
                      'video.ego_view_pad_res256_freq20'),
                  norm_stats_path: Optional[str] = None,
                  action_order: Optional[str] = None,
+                 denormalize_action_chunk: bool = False,
                  grouped_norm_stats: bool = False,
                  norm_stats_group_names: Optional[List[str]] = None,
                  deterministic_env: bool = True,
@@ -295,13 +302,17 @@ class RobocasaEvalRunner(BaseEvalRunner):
         self.model_family = model_family
         if action_order is None:
             action_order = 'n15' if model_family == 'groot' else 'fluxvla'
-        if action_order not in ('fluxvla', 'n15'):
+        if action_order not in ('fluxvla', 'n15', 'n17'):
             raise ValueError(f'Unsupported action_order={action_order}. '
-                             "Expected 'fluxvla' or 'n15'.")
-        self.action_keys = (
-            ROBOCASA_N15_ACTION_KEYS
-            if action_order == 'n15' else ROBOCASA_FLUXVLA_ACTION_KEYS)
+                             "Expected 'fluxvla', 'n15', or 'n17'.")
+        action_keys_by_order = {
+            'fluxvla': ROBOCASA_FLUXVLA_ACTION_KEYS,
+            'n15': ROBOCASA_N15_ACTION_KEYS,
+            'n17': ROBOCASA_N17_ACTION_KEYS,
+        }
+        self.action_keys = action_keys_by_order[action_order]
         self.action_order = action_order
+        self.denormalize_action_chunk = bool(denormalize_action_chunk)
         self.task_list = task_list
         self.max_episode_steps = max_episode_steps
         self.num_trials_per_task = num_trials_per_task
@@ -899,18 +910,39 @@ class RobocasaEvalRunner(BaseEvalRunner):
                                        f'max={action_max}, '
                                        f'mean={action_mean}\n')
 
-                    # Execute one action chunk.
-                    for action in actions:
-                        # Denormalize from [-1, 1] to raw joint positions.
+                    raw_state = getattr(self.dataset, 'last_raw_state', None)
+                    if self.denormalize_action_chunk:
                         denorm_input = dict(
-                            action=action,
+                            action=actions,
                             task_suite_name=self.unnorm_key,
                         )
-                        raw_state = getattr(self.dataset, 'last_raw_state',
-                                            None)
                         if raw_state is not None:
                             denorm_input['state'] = raw_state
-                        action_denormed = self._active_denorm(denorm_input)
+                        actions_to_execute = np.asarray(
+                            self._active_denorm(denorm_input))
+                        if actions_to_execute.ndim == 1:
+                            actions_to_execute = actions_to_execute[None, :]
+                        if actions_to_execute.shape[0] != actions.shape[0]:
+                            raise ValueError(
+                                'Chunk denormalization changed the action '
+                                f'horizon from {actions.shape[0]} to '
+                                f'{actions_to_execute.shape[0]}.')
+                    else:
+                        actions_to_execute = actions
+
+                    # Execute one action chunk.
+                    for action in actions_to_execute:
+                        # Denormalize from [-1, 1] to raw joint positions.
+                        if self.denormalize_action_chunk:
+                            action_denormed = action
+                        else:
+                            denorm_input = dict(
+                                action=action,
+                                task_suite_name=self.unnorm_key,
+                            )
+                            if raw_state is not None:
+                                denorm_input['state'] = raw_state
+                            action_denormed = self._active_denorm(denorm_input)
 
                         if t == 0:
                             denorm_min = format(action_denormed.min(), '.6g')

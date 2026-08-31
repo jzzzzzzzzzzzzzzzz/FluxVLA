@@ -376,11 +376,26 @@ class DenormalizeDeltaAction(DenormalizePrivateAction):
     unselected dimensions, such as grippers, remain absolute.
     """
 
-    def __init__(self, delta_action_mask: List[bool], *args, **kwargs):
+    def __init__(self,
+                 delta_action_mask: List[bool],
+                 state_permutation: Optional[List[int]] = None,
+                 *args,
+                 **kwargs):
         super().__init__(*args, **kwargs)
         self.delta_action_mask = np.asarray(delta_action_mask, dtype=bool)
         if self.delta_action_mask.ndim != 1:
             raise ValueError('delta_action_mask must be one-dimensional')
+        self.state_permutation = (None
+                                  if state_permutation is None else np.asarray(
+                                      state_permutation, dtype=np.int64))
+        if self.state_permutation is not None:
+            if self.state_permutation.ndim != 1:
+                raise ValueError('state_permutation must be one-dimensional')
+            expected = np.arange(self.state_permutation.size, dtype=np.int64)
+            if not np.array_equal(np.sort(self.state_permutation), expected):
+                raise ValueError(
+                    'state_permutation must contain every index in [0, D) '
+                    'exactly once.')
 
     def __call__(self, data: Dict) -> np.ndarray:
         action = np.asarray(super().__call__(data), dtype=np.float32)
@@ -395,6 +410,13 @@ class DenormalizeDeltaAction(DenormalizePrivateAction):
         if state.ndim != 1:
             raise ValueError(
                 f'Current robot state must have shape [D], got {state.shape}.')
+        if self.state_permutation is not None:
+            if state.shape[-1] != self.state_permutation.size:
+                raise ValueError(
+                    'state_permutation length '
+                    f'{self.state_permutation.size} does not match raw state '
+                    f'dimension {state.shape[-1]}.')
+            state = state[self.state_permutation]
         dims = len(self.delta_action_mask)
         if action.shape[-1] < dims or state.shape[-1] < dims:
             raise ValueError(
