@@ -124,7 +124,8 @@ class BaseInferenceRunner:
             dataset['model_path'] = os.path.dirname(os.path.dirname(ckpt_path))
             self.dataset = build_dataset_from_cfg(dataset)
 
-            self.vla = build_vla_from_cfg(cfg.inference_model)
+            inference_model_cfg = getattr(cfg, 'inference_model', cfg.model)
+            self.vla = build_vla_from_cfg(inference_model_cfg)
             assert Path.exists(Path(ckpt_path)), \
                 f'Checkpoint path {ckpt_path} does not exist!'
             if ckpt_path.endswith('.safetensors'):
