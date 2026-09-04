@@ -331,7 +331,11 @@ class DenormalizePrivateAction(DenormalizeLiberoAction):
                 action = action[0]
             elif action.ndim == 2 and action.shape[0] == 1:
                 action = action[0]
-            stats = norm_stats['action']
+            stats = norm_stats.get('action', norm_stats.get('actions'))
+            if stats is None:
+                raise KeyError(
+                    'Action normalization statistics must contain either '
+                    "'action' or 'actions'.")
             cont = self._denormalize_by_type(action, stats, self.norm_type,
                                              self.action_norm_mask)
             if self.discrete_action_dims:
