@@ -229,8 +229,7 @@ class AlohaInferenceRunner(BaseInferenceRunner):
 
     def _predict_action(self, inputs: dict):
         self._action_ctx.inference_start = time.time()
-        raw_action = self.vla.predict_action(**inputs)
-        return raw_action
+        return super()._predict_action(inputs)
 
     # Action layout: [left_arm(7), right_arm(7), base(2)]
     LEFT_GRIPPER_COL = 6
