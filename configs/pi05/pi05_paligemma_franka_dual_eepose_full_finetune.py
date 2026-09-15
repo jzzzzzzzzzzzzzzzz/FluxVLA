@@ -12,6 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
+
+_CHECKPOINT_ROOT = os.environ.get(
+    'FLUXVLA_CHECKPOINT_ROOT', '/mnt/data/cpfs/mnt/data/liyinhao/checkpoints')
+_PI05_BASE_DIR = os.path.join(_CHECKPOINT_ROOT, 'pi05_base')
+_PI05_BASE_MODEL = os.path.join(_PI05_BASE_DIR, 'model.safetensors')
+
 model = dict(
     type='PI05FlowMatching',
     llm_backbone=dict(
@@ -105,8 +112,7 @@ model = dict(
         vocab_size=257152),
     freeze_llm_backbone=False,
     freeze_vision_backbone=False,
-    pretrained_name_or_path=  # noqa: E251
-    './checkpoints/pi05_base/model.safetensors',  # noqa: E501
+    pretrained_name_or_path=_PI05_BASE_MODEL,
     name_mapping={
         'llm_backbone': 'paligemma_with_expert.paligemma.model.language_model',
         'vision_backbone.vision':
@@ -180,7 +186,7 @@ train_dataloader = dict(
                         tokenizer=dict(
                             type='PretrainedTokenizer',
                             model_path=  # noqa: E251
-                            'checkpoints/pi05_base',  # noqa: E501
+                            _PI05_BASE_DIR,
                             # special_tokens={'pad_token': '<PAD>'}
                         )),
                     dict(type='PadStatesAndActions', model_action_dim=32),
@@ -230,7 +236,7 @@ runner = dict(
     tokenizer=dict(
         type='PretrainedTokenizer',
         model_path=  # noqa: E251
-        'checkpoints/pi05_base',  # noqa: E501
+        _PI05_BASE_DIR,
         # special_tokens={'pad_token': '<PAD>'}
     ),
     metric=dict(
@@ -284,7 +290,7 @@ inference = dict(
                 tokenizer=dict(
                     type='PretrainedTokenizer',
                     model_path=  # noqa: E251
-                    'checkpoints/pi05_base',
+                    _PI05_BASE_DIR,
                     # special_tokens={'pad_token': '<PAD>'}
                 )),
             dict(type='PadStatesAndActions', model_action_dim=32),

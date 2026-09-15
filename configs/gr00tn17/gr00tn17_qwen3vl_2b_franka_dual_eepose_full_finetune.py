@@ -18,11 +18,16 @@ pose and gripper targets are absolute, matching the PI0.5 Franka EE-pose
 recipe and the 20260519 LeRobot dataset.
 """
 
+import os
+
 _base_ = ['./gr00tn17_qwen3vl_2b_libero_10_full_finetune.py']
 
-_DATASET_ROOT = (
-    '/mnt/data/cpfs/mnt/data/liyinhao/datasets/'
+_DATASET_ROOT = os.environ.get(
+    'FRANKA_TASK1_DATA_ROOT', '/mnt/data/cpfs/mnt/data/liyinhao/datasets/'
     'RealRobot_franka_dual_lerobotv2.1/20260519_dual_franka_teleop')
+_CHECKPOINT_ROOT = os.environ.get(
+    'FLUXVLA_CHECKPOINT_ROOT', '/mnt/data/cpfs/mnt/data/liyinhao/checkpoints')
+_BASE_MODEL = os.path.join(_CHECKPOINT_ROOT, 'GR00T-N1.7-3B')
 _STATISTIC_NAME = 'private'
 _EMBODIMENT_KEY = 'franka_dual_eepose'
 # Reuse N1.7's released Panda embodiment embedding for dual-Panda control.
@@ -219,6 +224,7 @@ _PROCESSOR_KWARGS = dict(
 )
 
 model = dict(
+    model_path=_BASE_MODEL,
     embodiment_tag=_EMBODIMENT_KEY,
     processor_kwargs=dict(
         _delete_=True,
@@ -422,6 +428,8 @@ inference = dict(
     type='FrankaInferenceRunner',
     keep_params_fp32=True,
     mixed_precision_dtype='bf16',
+    task_suite_name=_STATISTIC_NAME,
+    state_dim=16,
     task_descriptions={'1': _TASK_DESCRIPTION},
     seed=7,
     action_mode='cartesian',

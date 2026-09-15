@@ -54,7 +54,8 @@ class BaseVLA(nn.Module, GenerationMixin, ABC):
                  norm_stats: Dict = None,
                  pretrained_name_or_path: str = None,
                  name_mapping: Dict = None,
-                 strict_mapping: bool = False) -> None:
+                 strict_mapping: bool = False,
+                 pretrained_skip_prefixes: Optional[List[str]] = None) -> None:
         super().__init__()
         if vision_backbone is not None:
             self.vision_backbone = build_vision_backbone_from_cfg(
@@ -92,6 +93,7 @@ class BaseVLA(nn.Module, GenerationMixin, ABC):
         self.pretrained_name_or_path = pretrained_name_or_path
         self.name_mapping = name_mapping
         self.strict_mapping = strict_mapping
+        self.pretrained_skip_prefixes = tuple(pretrained_skip_prefixes or ())
         # Instance Attributes for a generic VLM
         self.all_module_keys = None
 
@@ -278,7 +280,8 @@ class BaseVLA(nn.Module, GenerationMixin, ABC):
         with torch.set_grad_enabled(self.vision_backbone_requires_grad):
             if isinstance(pixel_values, dict):
                 patch_features = self.vision_backbone({
-                    k: pixel_values[k][multimodal_indices]
+                    k:
+                    pixel_values[k][multimodal_indices]
                     for k in pixel_values
                 })
             else:
@@ -505,6 +508,23 @@ class BaseVLA(nn.Module, GenerationMixin, ABC):
         else:
             raise ValueError(f'Unsupported checkpoint format: '
                              f'{self.pretrained_name_or_path}')
+
+        if self.pretrained_skip_prefixes:
+            if self.strict_mapping:
+                raise ValueError('pretrained_skip_prefixes requires '
+                                 'strict_mapping=False.')
+            skipped = [
+                name for name in pretrained_weights
+                if name.startswith(self.pretrained_skip_prefixes)
+            ]
+            pretrained_weights = {
+                name: value
+                for name, value in pretrained_weights.items()
+                if name not in skipped
+            }
+            if skipped:
+                overwatch.info('Reinitializing checkpoint parameters under: '
+                               f'{self.pretrained_skip_prefixes}')
 
         # Load weights with name_mapping handling
         if not self.name_mapping:

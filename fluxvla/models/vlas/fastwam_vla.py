@@ -76,6 +76,7 @@ class FastWAMVLA(BaseVLA):
         num_views: Optional[int] = None,
         mot_checkpoint_mixed_attn: bool = False,
         pretrained_name_or_path: Optional[str] = None,
+        pretrained_skip_prefixes: Optional[list[str]] = None,
         freeze_vlm_backbone: bool = True,
         device: str = 'cpu',
         torch_dtype: torch.dtype = torch.float32,
@@ -86,7 +87,8 @@ class FastWAMVLA(BaseVLA):
             freeze_vlm_backbone=freeze_vlm_backbone,
             pretrained_name_or_path=pretrained_name_or_path,
             name_mapping=None,
-            strict_mapping=True,
+            strict_mapping=not bool(pretrained_skip_prefixes),
+            pretrained_skip_prefixes=pretrained_skip_prefixes,
         )
         if pretrained_name_or_path is None:
             raise ValueError(

@@ -14,6 +14,7 @@ import io
 import threading
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Callable
 
 import numpy as np
@@ -23,6 +24,7 @@ import zmq
 from .serializers import (FORMAT_PROTOBUF, MsgSerializer, ObsSerializer,
                           decode_predict_request, detect_format,
                           encode_predict_response)
+from .debug_capture import DebugCaptureWriter
 
 
 def serialize_actions(actions: torch.Tensor) -> bytes:
@@ -191,6 +193,9 @@ def create_server(
     port: int = 5555,
     device: str = 'cuda:0',
     mixed_precision_dtype=torch.bfloat16,
+    debug_capture_dir: str = None,
+    debug_capture_every: int = 1,
+    debug_capture_max: int = 50,
 ) -> PolicyServer:
     """Create a ZMQ server that wraps a VLA model.
 
@@ -203,6 +208,10 @@ def create_server(
         port: Bind port.
         device: CUDA device.
         mixed_precision_dtype: Dtype for autocast.
+        debug_capture_dir: Optional directory for decoded observations,
+            transformed model inputs, and model outputs.
+        debug_capture_every: Capture every Nth request.
+        debug_capture_max: Stop capturing after this many requests.
     """
     torch_device = torch.device(device)
     vla.eval()
@@ -211,58 +220,90 @@ def create_server(
     lock = threading.Lock()
     total_requests = 0
     total_infer_time = 0.0
+    request_sequence = 0
     start_time = time.time()
+    capture_writer = None
+    if debug_capture_dir:
+        capture_writer = DebugCaptureWriter(
+            debug_capture_dir,
+            every=debug_capture_every,
+            max_captures=debug_capture_max,
+            image_color_order='rgb')
+        print(f'[VLAServer] Debug capture enabled: '
+              f'{Path(debug_capture_dir).expanduser().resolve()} '
+              f'(every={debug_capture_every}, max={debug_capture_max})')
 
     def predict_action(obs_data: bytes = None,
                        unnorm_key: str = '',
                        _obs_dict: dict = None,
                        _wire_format: int = 0) -> dict:
-        nonlocal total_requests, total_infer_time
+        nonlocal total_requests, total_infer_time, request_sequence
 
         obs = _obs_dict if _obs_dict is not None else \
             ObsSerializer.from_bytes(obs_data)
-        denormalize_context = {}
-        if isinstance(obs, dict) and obs.get('qpos') is not None:
-            denormalize_context['state'] = np.asarray(
-                obs['qpos'], dtype=np.float32).copy()
+        request_index = request_sequence
+        request_sequence += 1
+        capture_path = None
+        if capture_writer is not None:
+            capture_path = capture_writer.start(request_index, obs, unnorm_key)
 
-        if dataset is not None:
-            result = dataset(obs)
-            batch = result[0] if isinstance(result, tuple) else result
-            if 'state' not in denormalize_context:
-                raw_state = getattr(dataset, 'last_raw_state', None)
-                if raw_state is not None:
-                    denormalize_context['state'] = np.asarray(
-                        raw_state, dtype=np.float32).copy()
-        else:
-            batch = obs
-        if unnorm_key:
-            batch['unnorm_key'] = unnorm_key
+        try:
+            denormalize_context = {}
+            if isinstance(obs, dict) and obs.get('qpos') is not None:
+                denormalize_context['state'] = np.asarray(
+                    obs['qpos'], dtype=np.float32).copy()
 
-        t0 = time.perf_counter()
-        autocast_enabled = (
-            torch_device.type == 'cuda'
-            and mixed_precision_dtype in {torch.bfloat16, torch.float16})
-        with torch.no_grad(), torch.autocast(
-                torch_device.type,
-                dtype=mixed_precision_dtype,
-                enabled=autocast_enabled):
-            for k, v in batch.items():
-                if isinstance(v, torch.Tensor):
-                    batch[k] = v.to(torch_device)
-            actions = vla.predict_action(**batch)
-        infer_time = time.perf_counter() - t0
+            if dataset is not None:
+                result = dataset(obs)
+                batch = result[0] if isinstance(result, tuple) else result
+                if 'state' not in denormalize_context:
+                    raw_state = getattr(dataset, 'last_raw_state', None)
+                    if raw_state is not None:
+                        denormalize_context['state'] = np.asarray(
+                            raw_state, dtype=np.float32).copy()
+            else:
+                batch = obs
+            if unnorm_key:
+                batch['unnorm_key'] = unnorm_key
+            if capture_path is not None:
+                capture_writer.write_mapping(capture_path, 'model_inputs',
+                                             batch)
 
-        if denormalize_action is not None:
-            actions_np = actions.cpu().numpy()
-            d = denormalize_action(
-                dict(
-                    action=actions_np,
-                    task_suite_name=task_suite_name,
-                    **denormalize_context))
-            actions = torch.from_numpy(d.astype(np.float32))
+            t0 = time.perf_counter()
+            autocast_enabled = (
+                torch_device.type == 'cuda'
+                and mixed_precision_dtype in {torch.bfloat16, torch.float16})
+            with torch.no_grad(), torch.autocast(
+                    torch_device.type,
+                    dtype=mixed_precision_dtype,
+                    enabled=autocast_enabled):
+                for k, v in batch.items():
+                    if isinstance(v, torch.Tensor):
+                        batch[k] = v.to(torch_device)
+                actions = vla.predict_action(**batch)
+            infer_time = time.perf_counter() - t0
+            if capture_path is not None:
+                capture_writer.write_array(capture_path, 'normalized_actions',
+                                           actions)
 
-        action_bytes = serialize_actions(actions)
+            if denormalize_action is not None:
+                actions_np = actions.cpu().numpy()
+                d = denormalize_action(
+                    dict(
+                        action=actions_np,
+                        task_suite_name=task_suite_name,
+                        **denormalize_context))
+                actions = torch.from_numpy(d.astype(np.float32))
+            if capture_path is not None:
+                capture_writer.write_array(capture_path,
+                                           'denormalized_actions', actions)
+                capture_writer.finish(capture_path, infer_time)
+
+            action_bytes = serialize_actions(actions)
+        except Exception as error:
+            if capture_writer is not None:
+                capture_writer.fail(capture_path, error)
+            raise
 
         with lock:
             total_requests += 1

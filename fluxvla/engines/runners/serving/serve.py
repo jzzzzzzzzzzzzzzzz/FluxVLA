@@ -34,6 +34,22 @@ def parse_args():
         default=None,
         choices=['inference', 'eval'],
         help='Config key to load dataset pipeline from')
+    parser.add_argument(
+        '--debug-capture-dir',
+        default=(os.environ.get('FRANKA_DEBUG_CAPTURE_DIR')
+                 or os.environ.get('FLUXVLA_DEBUG_CAPTURE_DIR')),
+        help='Optional directory for raw observations, transformed model '
+        'inputs, and actions')
+    parser.add_argument(
+        '--debug-capture-every',
+        type=int,
+        default=int(os.environ.get('FRANKA_DEBUG_CAPTURE_EVERY', '1')),
+        help='Capture every Nth predict request (default: 1)')
+    parser.add_argument(
+        '--debug-capture-max',
+        type=int,
+        default=int(os.environ.get('FRANKA_DEBUG_CAPTURE_MAX', '50')),
+        help='Maximum number of requests to capture (default: 50)')
     return parser.parse_args()
 
 
@@ -133,6 +149,9 @@ def main():
         port=args.port,
         device=args.device,
         mixed_precision_dtype=dtype_map[args.dtype],
+        debug_capture_dir=args.debug_capture_dir,
+        debug_capture_every=args.debug_capture_every,
+        debug_capture_max=args.debug_capture_max,
     )
     print(f'[serve] ZMQ server starting on tcp://{args.host}:{args.port}')
     try:
