@@ -18,6 +18,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
+from ..utils.postprocess import Trajectory, TrajectoryPostprocessor
 from ..utils.root import RUNNERS
 from ..utils.trajectory_utils import resample_remaining
 from .base_inference_runner import BaseInferenceRunner
@@ -55,6 +56,7 @@ class FrankaInferenceRunner(BaseInferenceRunner):
                  async_execution: bool = False,
                  execute_horizon: int = None,
                  observation_timeout: float = 15.0,
+                 postprocess_config: dict = None,
                  *args,
                  **kwargs):
         """Initialize Franka-specific defaults and runtime options."""
@@ -66,6 +68,18 @@ class FrankaInferenceRunner(BaseInferenceRunner):
         self.async_execution = async_execution
         self.execute_horizon = execute_horizon
         self.observation_timeout = observation_timeout
+        self.postprocess_config = postprocess_config or {}
+        if (self.postprocess_config.get('enabled', False)
+                and self.action_mode != 'joint'):
+            raise ValueError('Franka trajectory postprocessing requires '
+                             "action_mode='joint'")
+        operator_config = kwargs.get('operator') or {}
+        if (self.postprocess_config.get('enabled', False)
+                and operator_config.get('command_mode', 'joint') != 'joint'):
+            raise ValueError('Franka trajectory postprocessing requires '
+                             "operator.command_mode='joint'")
+        self.trajectory_postprocessor = TrajectoryPostprocessor(
+            self.postprocess_config)
 
         # Set Franka-specific camera defaults used by the training configs.
         if 'camera_names' not in kwargs or kwargs['camera_names'] is None:
@@ -230,11 +244,15 @@ class FrankaInferenceRunner(BaseInferenceRunner):
         from ..utils import initialize_overwatch
         overwatch = initialize_overwatch(__name__)
 
+        if self.disable_puppet_arm:
+            self.reset_inference_history()
+            return
+
         self.ros_operator.stop_trajectory()
 
         overwatch.info('Moving to prepare pose...')
         self.ros_operator.gohome(self.prepare_pose)
-        self.observation_window = None
+        self.reset_inference_history()
         overwatch.info('Prepare pose reached')
         return
 
@@ -305,8 +323,49 @@ class FrankaInferenceRunner(BaseInferenceRunner):
     GRIPPER_CLOSED = 0.0
 
     def _postprocess_actions(self, raw_action):
-        """Denormalize and snap near-closed grippers to fully closed."""
+        """Process arm joints and handle grippers separately."""
         actions = super()._postprocess_actions(raw_action)
+        self._validate_action_width(actions)
+        if self.postprocess_config.get('enabled', False):
+            if len(actions) == 0:
+                raise ValueError('Franka joint targets must not be empty')
+            dof_indices = [
+                arm_index * 8 + joint_index
+                for arm_index in range(len(self.active_arms))
+                for joint_index in range(7)
+            ]
+            if not np.isfinite(actions[:, dof_indices]).all():
+                raise ValueError('Franka joint targets must be finite')
+            trajectory = Trajectory(
+                t0=self._action_ctx.inference_start,
+                dt=self.dt,
+                positions=actions)
+            previous = getattr(self._prev_ctx, 'trajectory', None)
+            processor = self.trajectory_postprocessor
+            if previous is None:
+                state = getattr(self._action_ctx, 'state', None)
+                if state is None:
+                    raise ValueError('Initial Franka joint state is required '
+                                     'for trajectory postprocessing')
+                state = np.asarray(state, dtype=float)
+                if (state.ndim != 1 or len(state) < len(self.active_arms) * 8
+                        or not np.isfinite(state[dof_indices]).all()):
+                    raise ValueError('Invalid initial Franka joint state')
+                # Start from observed q; the first chunk assumes rest.
+                previous = Trajectory(
+                    t0=trajectory.t0,
+                    dt=self.dt,
+                    positions=state[None, :],
+                    velocities=np.zeros_like(state[None, :]),
+                    accelerations=np.zeros_like(state[None, :]))
+                processor = TrajectoryPostprocessor(
+                    dict(self.postprocess_config, num_stitch=0))
+            trajectory = processor.process(trajectory, dof_indices, previous)
+            if not np.isfinite(trajectory.positions[:, dof_indices]).all():
+                raise ValueError('Franka postprocessed joint targets '
+                                 'must be finite')
+            self._action_ctx.trajectory = trajectory
+            actions = trajectory.positions
         for arm_index in range(len(self.active_arms)):
             col = self._get_arm_action_slice(arm_index).start + 7
             if col >= actions.shape[1]:
@@ -395,6 +454,8 @@ class FrankaInferenceRunner(BaseInferenceRunner):
 
     def _validate_action_width(self, actions):
         """Ensure each active arm has a full 8D action block."""
+        if actions.ndim != 2:
+            raise ValueError('Franka actions must be a 2D action chunk')
         required = len(self.active_arms) * 8
         if actions.shape[1] < required:
             raise ValueError(
@@ -425,13 +486,14 @@ class FrankaInferenceRunner(BaseInferenceRunner):
     def _build_arm_observation_from_frame(self, frame, arm):
         """Build joint, pose, and gripper observation for one arm."""
         joint_state = frame[f'{arm}_arm']
+        pose = frame.get(f'{arm}_pose')
+        if pose is None:
+            pose = self._franka_state_to_pose_stamped(
+                frame[f'{arm}_franka_state'])
         return {
-            'joint_state':
-            joint_state,
-            'pose':
-            self._franka_state_to_pose_stamped(frame[f'{arm}_franka_state']),
-            'gripper_width':
-            self._joint_state_to_gripper_width(joint_state),
+            'joint_state': joint_state,
+            'pose': pose,
+            'gripper_width': self._joint_state_to_gripper_width(joint_state),
         }
 
     @staticmethod
